@@ -267,6 +267,9 @@ class ListTable extends WP_List_Table {
 		// We must ensure the 'paginate' argument is set.
 		$order_query_args['paginate'] = true;
 
+		// Also set approximate count to true, since reponsiveness is more important than accuracy.
+		$order_query_args['approx_page_count'] = 10;
+
 		$orders      = wc_get_orders( $order_query_args );
 		$this->items = $orders->orders;
 
@@ -302,6 +305,8 @@ class ListTable extends WP_List_Table {
 		$direction = strtoupper( sanitize_text_field( wp_unslash( $_GET['order'] ?? '' ) ) );
 
 		if ( ! in_array( $field, $sortable, true ) ) {
+			$this->order_query_args['orderby'] = 'id';
+			$this->order_query_args['order']   = 'DESC';
 			return;
 		}
 
