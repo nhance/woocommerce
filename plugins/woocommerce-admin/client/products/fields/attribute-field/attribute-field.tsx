@@ -28,6 +28,10 @@ import { AddAttributeModal } from './add-attribute-modal';
 import { EditAttributeModal } from './edit-attribute-modal';
 import { reorderSortableProductAttributePositions } from './utils';
 import { sift } from '../../../utils';
+import {
+	AddAttributeListItem,
+	AttributeListItem,
+} from '../attribute-list-item';
 
 type AttributeFieldProps = {
 	value: ProductAttribute[];
@@ -278,63 +282,25 @@ export const AttributeField: React.FC< AttributeFieldProps > = ( {
 				} }
 			>
 				{ sortedAttributes.map( ( attribute ) => (
-					<ListItem key={ fetchAttributeId( attribute ) }>
-						<div>{ attribute.name }</div>
-						<div className="woocommerce-attribute-field__attribute-options">
-							{ attribute.options
-								.slice( 0, 2 )
-								.map( ( option, index ) => (
-									<div
-										className="woocommerce-attribute-field__attribute-option-chip"
-										key={ index }
-									>
-										{ option }
-									</div>
-								) ) }
-							{ attribute.options.length > 2 && (
-								<div className="woocommerce-attribute-field__attribute-option-chip">
-									{ sprintf(
-										__( '+ %i more', 'woocommerce' ),
-										attribute.options.length - 2
-									) }
-								</div>
-							) }
-						</div>
-						<div className="woocommerce-attribute-field__attribute-actions">
-							<Button
-								variant="tertiary"
-								onClick={ () =>
-									setEditingAttributeId(
-										fetchAttributeId( attribute )
-									)
-								}
-							>
-								{ __( 'edit', 'woocommerce' ) }
-							</Button>
-							<Button
-								icon={ closeSmall }
-								label={ __(
-									'Remove attribute',
-									'woocommerce'
-								) }
-								onClick={ () => onRemove( attribute ) }
-							></Button>
-						</div>
-					</ListItem>
+					<AttributeListItem
+						attribute={ attribute }
+						key={ fetchAttributeId( attribute ) }
+						onEditClick={ () =>
+							setEditingAttributeId(
+								fetchAttributeId( attribute )
+							)
+						}
+						onRemoveClick={ () => onRemove( attribute ) }
+					/>
 				) ) }
 			</Sortable>
-			<ListItem>
-				<Button
-					variant="secondary"
-					className="woocommerce-attribute-field__add-attribute"
-					onClick={ () => {
-						recordEvent( 'product_add_attribute_button' );
-						setShowAddAttributeModal( true );
-					} }
-				>
-					{ addButtonLabel }
-				</Button>
-			</ListItem>
+			<AddAttributeListItem
+				label={ addButtonLabel }
+				onAddClick={ () => {
+					recordEvent( 'product_add_attribute_button' );
+					setShowAddAttributeModal( true );
+				} }
+			/>
 			{ showAddAttributeModal && (
 				<AddAttributeModal
 					onCancel={ () => {
