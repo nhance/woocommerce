@@ -18,6 +18,7 @@ import { ImagesSection } from './sections/images-section';
 import './product-page.scss';
 import { validate } from './product-validation';
 import { AttributesSection } from './sections/attributes-section';
+import { OptionsSection } from './sections/options-section';
 import { ProductFormFooter } from './layout/product-form-footer';
 
 export const ProductForm: React.FC< {
@@ -47,6 +48,7 @@ export const ProductForm: React.FC< {
 				<ProductInventorySection />
 				<ProductShippingSection product={ product } />
 				<AttributesSection />
+				<OptionsSection />
 			</ProductFormLayout>
 			<ProductFormFooter />
 		</Form>
