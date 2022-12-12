@@ -123,6 +123,16 @@ class OrdersTableQuery {
 	private $count_sql = '';
 
 	/**
+<<<<<<< HEAD
+	 * SQL query to see if there are more pages after the current page.
+	 *
+	 * @var string
+	 */
+	private $approx_count_sql = '';
+
+	/**
+=======
+>>>>>>> trunk
 	 * The number of pages (when pagination is enabled).
 	 *
 	 * @var int
@@ -572,9 +582,6 @@ class OrdersTableQuery {
 			$this->join  = $sql['join'] ? array_merge( $this->join, $sql['join'] ) : $this->join;
 			$this->where = $sql['where'] ? array_merge( $this->where, array( $sql['where'] ) ) : $this->where;
 
-			if ( $sql['join'] ) {
-				$this->groupby[] = "{$this->tables['orders']}.id";
-			}
 		}
 
 		// Date queries.
@@ -588,12 +595,10 @@ class OrdersTableQuery {
 
 		$orders_table = $this->tables['orders'];
 
-		// SELECT [fields].
-		$this->fields = "{$orders_table}.id";
-		$fields       = $this->fields;
-
-		// SQL_CALC_FOUND_ROWS.
-		$found_rows = '';
+		// Group by is a faster substitute for DISTINCT, as long as we are only selecting IDs. MySQL don't like it when we join tables and use DISTINCT.
+		$this->groupby[] = "{$this->tables['orders']}.id";
+		$this->fields    = "{$orders_table}.id";
+		$fields          = $this->fields;
 
 		// JOIN.
 		$join = implode( ' ', array_unique( array_filter( array_map( 'trim', $this->join ) ) ) );
@@ -619,8 +624,9 @@ class OrdersTableQuery {
 		// GROUP BY.
 		$groupby = $this->groupby ? 'GROUP BY ' . implode( ', ', (array) $this->groupby ) : '';
 
-		$this->sql = "SELECT $found_rows DISTINCT $fields FROM $orders_table $join WHERE $where $groupby $orderby $limits";
+		$this->sql = "SELECT $fields FROM $orders_table $join WHERE $where $groupby $orderby $limits";
 		$this->build_count_query( $fields, $join, $where, $groupby );
+		$this->build_approx_count_query( $fields, $join, $where, $groupby, $this->args['approx_page_count'] ?? 10 );
 	}
 
 	/**
@@ -633,10 +639,36 @@ class OrdersTableQuery {
 	 */
 	private function build_count_query( $fields, $join, $where, $groupby ) {
 		if ( ! isset( $this->sql ) || '' === $this->sql ) {
-			wc_doing_it_wrong( __FUNCTION__, 'Count query can only be build after main query is built.', '7.3.0' );
+			wc_doing_it_wrong( __FUNCTION__, 'Count query can only be build after main query is built.', '7.2.0' );
 		}
 		$orders_table    = $this->tables['orders'];
-		$this->count_sql = "SELECT COUNT(DISTINCT $fields) FROM  $orders_table $join WHERE $where $groupby";
+		$this->count_sql = "SELECT COUNT(DISTINCT $fields) FROM  $orders_table $join WHERE $where";
+	}
+
+	/**
+	 * Unlike MSSQL, currently MySQL does not support a APPROX_COUNT_DISTINCT function, so we very crudly simulate it by calculating if there are alteast X records, where X is Nth page from current page (N defaults to 10). Pagination UI can use this information to display a "more" button.
+	 *
+	 * This function builds a query for approx count distinct.
+	 *
+	 * @param string $fields    Prepared fields for SELECT clause.
+	 * @param string $join      Prepared JOIN clause.
+	 * @param string $where     Prepared WHERE clause.
+	 * @param string $groupby   Prepared GROUP BY clause.
+	 * @param int    $approx_page_count Till what page we should check for existance of records.
+	 */
+	private function build_approx_count_query( $fields, $join, $where, $groupby, $approx_page_count = 10 ) {
+		if ( ! isset( $this->sql ) || '' === $this->sql ) {
+			wc_doing_it_wrong( __FUNCTION__, 'Approx count query can only be build after main query is built.', '7.2.0' );
+		}
+
+		if ( ! isset( $this->limits ) || count( $this->limits ) < 2 ) {
+			$offset = get_option( 'posts_per_page', 10 );
+		} else {
+			$offset = absint( ( $this->limits[0] ?? 0 ) + ( absint( $approx_page_count ) * ( $this->limits[1] ?? 10 ) ) ); // limit[0] = offset, limit[1] = row count.
+		}
+
+		$orders_table           = $this->tables['orders'];
+		$this->approx_count_sql = "SELECT 1 FROM $orders_table $join WHERE $where $groupby LIMIT 1 OFFSET $offset"; // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 	}
 
 	/**
@@ -1034,7 +1066,17 @@ class OrdersTableQuery {
 		}
 
 		if ( $this->limits ) {
-			$this->found_orders  = absint( $wpdb->get_var( $this->count_sql ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			if ( $this->arg_isset( 'approx_page_count' ) ) {
+				$has_lot_more_pages = $wpdb->get_var( $this->approx_count_sql ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+				if ( $has_lot_more_pages ) {
+					$this->found_orders = $this->limits[0] + ( absint( $this->args['approx_page_count'] ) * $this->limits[1] );
+				}
+			}
+
+			if ( ! isset( $this->found_orders ) || 0 === $this->found_orders ) {
+				$this->found_orders = absint( $wpdb->get_var( $this->count_sql ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			}
+
 			$this->max_num_pages = (int) ceil( $this->found_orders / $this->args['limit'] );
 		} else {
 			$this->found_orders = count( $this->orders );
