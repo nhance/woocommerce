@@ -12,6 +12,7 @@ import {
 	ProductShippingClass,
 } from '@woocommerce/data';
 import interpolateComponents from '@automattic/interpolate-components';
+import { recordEvent } from '@woocommerce/tracks';
 import {
 	BaseControl,
 	Card,
@@ -32,7 +33,6 @@ import {
 } from '../fields/shipping-dimensions-image';
 import { useProductHelper } from '../use-product-helper';
 import { AddNewShippingClassModal } from '../shared/add-new-shipping-class-modal';
-import { getTextControlProps } from './utils';
 import './product-shipping-section.scss';
 import {
 	ADD_NEW_SHIPPING_CLASS_OPTION_VALUE,
@@ -41,6 +41,10 @@ import {
 
 export type ProductShippingSectionProps = {
 	product?: PartialProduct;
+};
+
+type ServerErrorResponse = {
+	code: string;
 };
 
 export const DEFAULT_SHIPPING_CLASS_OPTIONS: SelectControl.Option[] = [
@@ -71,19 +75,26 @@ function getInterpolatedSizeLabel( mixedString: string ) {
 
 /**
  * This extracts a shipping class from the product categories. Using
- * the first category different to `Uncategorized`.
+ * the first category different to `Uncategorized` and check if the
+ * category was not added to the shipping class list
  *
  * @see https://github.com/woocommerce/woocommerce/issues/34657
+ * @see https://github.com/woocommerce/woocommerce/issues/35037
  * @param product The product
+ * @param shippingClasses The shipping classes
  * @return The default shipping class
  */
 function extractDefaultShippingClassFromProduct(
-	product: PartialProduct
+	product?: PartialProduct,
+	shippingClasses?: ProductShippingClass[]
 ): Partial< ProductShippingClass > | undefined {
 	const category = product?.categories?.find(
 		( { slug } ) => slug !== UNCATEGORIZED_CATEGORY_SLUG
 	);
-	if ( category ) {
+	if (
+		category &&
+		! shippingClasses?.some( ( { slug } ) => slug === category.slug )
+	) {
 		return {
 			name: category.name,
 			slug: category.slug,
@@ -94,7 +105,8 @@ function extractDefaultShippingClassFromProduct(
 export function ProductShippingSection( {
 	product,
 }: ProductShippingSectionProps ) {
-	const { getInputProps, setValue } = useFormContext< PartialProduct >();
+	const { getInputProps, getSelectControlProps, setValue } =
+		useFormContext< PartialProduct >();
 	const { formatNumber, parseNumber } = useProductHelper();
 	const [ highlightSide, setHighlightSide ] =
 		useState< ShippingDimensionsImageProps[ 'highlight' ] >();
@@ -139,20 +151,53 @@ export function ProductShippingSection( {
 	const { createProductShippingClass, invalidateResolution } = useDispatch(
 		EXPERIMENTAL_PRODUCT_SHIPPING_CLASSES_STORE_NAME
 	);
+	const { createErrorNotice } = useDispatch( 'core/notices' );
 
-	const selectShippingClassProps = getTextControlProps(
-		getInputProps( 'shipping_class' )
+	const dimensionProps = {
+		onBlur: () => {
+			setHighlightSide( undefined );
+		},
+		sanitize: ( value: PartialProduct[ keyof PartialProduct ] ) =>
+			parseNumber( String( value ) ),
+		suffix: dimensionUnit,
+	};
+
+	const inputWidthProps = getInputProps( 'dimensions.width', dimensionProps );
+	const inputLengthProps = getInputProps(
+		'dimensions.length',
+		dimensionProps
 	);
-	const inputWidthProps = getTextControlProps(
-		getInputProps( 'dimensions.width' )
+	const inputHeightProps = getInputProps(
+		'dimensions.height',
+		dimensionProps
 	);
-	const inputLengthProps = getTextControlProps(
-		getInputProps( 'dimensions.length' )
-	);
-	const inputHeightProps = getTextControlProps(
-		getInputProps( 'dimensions.height' )
-	);
-	const inputWeightProps = getTextControlProps( getInputProps( 'weight' ) );
+	const inputWeightProps = getInputProps( 'weight', {
+		sanitize: ( value: PartialProduct[ keyof PartialProduct ] ) =>
+			parseNumber( String( value ) ),
+	} );
+	const shippingClassProps = getInputProps( 'shipping_class' );
+
+	function handleShippingClassServerError(
+		error: ServerErrorResponse
+	): Promise< ProductShippingClass > {
+		let message = __(
+			'We couldn’t add this shipping class. Try again in a few seconds.',
+			'woocommerce'
+		);
+
+		if ( error.code === 'term_exists' ) {
+			message = __(
+				'A shipping class with that slug already exists.',
+				'woocommerce'
+			);
+		}
+
+		createErrorNotice( message, {
+			explicitDismiss: true,
+		} );
+
+		throw error;
+	}
 
 	return (
 		<ProductSectionLayout
@@ -167,14 +212,10 @@ export function ProductShippingSection( {
 					{ hasResolvedShippingClasses ? (
 						<>
 							<SelectControl
-								{ ...selectShippingClassProps }
 								label={ __( 'Shipping class', 'woocommerce' ) }
-								options={ [
-									...DEFAULT_SHIPPING_CLASS_OPTIONS,
-									...mapShippingClassToSelectOption(
-										shippingClasses ?? []
-									),
-								] }
+								{ ...getSelectControlProps( 'shipping_class', {
+									className: 'half-width-field',
+								} ) }
 								onChange={ ( value: string ) => {
 									if (
 										value ===
@@ -183,8 +224,14 @@ export function ProductShippingSection( {
 										setShowShippingClassModal( true );
 										return;
 									}
-									selectShippingClassProps?.onChange( value );
+									shippingClassProps.onChange( value );
 								} }
+								options={ [
+									...DEFAULT_SHIPPING_CLASS_OPTIONS,
+									...mapShippingClassToSelectOption(
+										shippingClasses ?? []
+									),
+								] }
 							/>
 							<span className="woocommerce-product-form__secondary-text">
 								{ interpolateComponents( {
@@ -198,6 +245,11 @@ export function ProductShippingSection( {
 												href={ `${ ADMIN_URL }admin.php?page=wc-settings&tab=shipping&section=classes` }
 												target="_blank"
 												type="external"
+												onClick={ () => {
+													recordEvent(
+														'product_shipping_global_settings_link_click'
+													);
+												} }
 											>
 												<></>
 											</Link>
@@ -235,7 +287,7 @@ export function ProductShippingSection( {
 										<InputControl
 											{ ...inputWidthProps }
 											value={ formatNumber(
-												inputWidthProps.value
+												String( inputWidthProps.value )
 											) }
 											label={ getInterpolatedSizeLabel(
 												__(
@@ -243,19 +295,9 @@ export function ProductShippingSection( {
 													'woocommerce'
 												)
 											) }
-											onChange={ ( value: string ) =>
-												inputWidthProps?.onChange(
-													parseNumber( value )
-												)
-											}
 											onFocus={ () => {
 												setHighlightSide( 'A' );
 											} }
-											onBlur={ () => {
-												setHighlightSide( undefined );
-												inputWidthProps?.onBlur();
-											} }
-											suffix={ dimensionUnit }
 										/>
 									</BaseControl>
 
@@ -267,7 +309,7 @@ export function ProductShippingSection( {
 										<InputControl
 											{ ...inputLengthProps }
 											value={ formatNumber(
-												inputLengthProps.value
+												String( inputLengthProps.value )
 											) }
 											label={ getInterpolatedSizeLabel(
 												__(
@@ -275,19 +317,9 @@ export function ProductShippingSection( {
 													'woocommerce'
 												)
 											) }
-											onChange={ ( value: string ) =>
-												inputLengthProps?.onChange(
-													parseNumber( value )
-												)
-											}
 											onFocus={ () => {
 												setHighlightSide( 'B' );
 											} }
-											onBlur={ () => {
-												setHighlightSide( undefined );
-												inputLengthProps?.onBlur();
-											} }
-											suffix={ dimensionUnit }
 										/>
 									</BaseControl>
 
@@ -299,7 +331,7 @@ export function ProductShippingSection( {
 										<InputControl
 											{ ...inputHeightProps }
 											value={ formatNumber(
-												inputHeightProps.value
+												String( inputHeightProps.value )
 											) }
 											label={ getInterpolatedSizeLabel(
 												__(
@@ -307,19 +339,9 @@ export function ProductShippingSection( {
 													'woocommerce'
 												)
 											) }
-											onChange={ ( value: string ) =>
-												inputHeightProps?.onChange(
-													parseNumber( value )
-												)
-											}
 											onFocus={ () => {
 												setHighlightSide( 'C' );
 											} }
-											onBlur={ () => {
-												setHighlightSide( undefined );
-												inputHeightProps?.onBlur();
-											} }
-											suffix={ dimensionUnit }
 										/>
 									</BaseControl>
 
@@ -331,17 +353,12 @@ export function ProductShippingSection( {
 										<InputControl
 											{ ...inputWeightProps }
 											value={ formatNumber(
-												inputWeightProps.value
+												String( inputWeightProps.value )
 											) }
 											label={ __(
 												'Weight',
 												'woocommerce'
 											) }
-											onChange={ ( value: string ) =>
-												inputWeightProps?.onChange(
-													parseNumber( value )
-												)
-											}
 											suffix={ weightUnit }
 										/>
 									</BaseControl>
@@ -364,18 +381,25 @@ export function ProductShippingSection( {
 
 			{ showShippingClassModal && (
 				<AddNewShippingClassModal
-					shippingClass={
-						product &&
-						extractDefaultShippingClassFromProduct( product )
-					}
-					onAdd={ ( values ) =>
+					shippingClass={ extractDefaultShippingClassFromProduct(
+						product,
+						shippingClasses
+					) }
+					onAdd={ ( shippingClassValues ) =>
 						createProductShippingClass<
 							Promise< ProductShippingClass >
-						>( values ).then( ( value ) => {
-							invalidateResolution( 'getProductShippingClasses' );
-							setValue( 'shipping_class', value.slug );
-							return value;
-						} )
+						>( shippingClassValues )
+							.then( ( value ) => {
+								recordEvent(
+									'product_new_shipping_class_modal_add_button_click'
+								);
+								invalidateResolution(
+									'getProductShippingClasses'
+								);
+								setValue( 'shipping_class', value.slug );
+								return value;
+							} )
+							.catch( handleShippingClassServerError )
 					}
 					onCancel={ () => setShowShippingClassModal( false ) }
 				/>

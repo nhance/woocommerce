@@ -481,6 +481,38 @@ class OrdersTableDataStoreTests extends WC_Unit_Test_Case {
 	}
 
 	/**
+	 * @testdox Test the trash-untrash cycle with sync enabled.
+	 */
+	public function test_cot_datastore_untrash() {
+		global $wpdb;
+
+		$this->enable_cot_sync();
+
+		// Tests trashing of orders.
+		$order = $this->create_complex_cot_order();
+		$order->set_status( 'on-hold' );
+		$order->save();
+		$order_id = $order->get_id();
+
+		$this->sut->trash_order( $order );
+
+		//phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders
+		$orders_table = $this->sut::get_orders_table_name();
+		$this->assertEquals( 'trash', $wpdb->get_var( $wpdb->prepare( "SELECT status FROM {$orders_table} WHERE id = %d", $order_id ) ) );
+		$this->assertEquals( 'trash', $wpdb->get_var( $wpdb->prepare( "SELECT post_status FROM {$wpdb->posts} WHERE id = %d", $order_id ) ) );
+
+		$this->sut->read( $order );
+		$this->sut->untrash_order( $order );
+
+		$this->assertEquals( 'on-hold', $order->get_status() );
+		$this->assertEquals( 'wc-on-hold', get_post_status( $order_id ) );
+
+		$this->assertEmpty( $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$this->sut->get_meta_table_name()} WHERE order_id = %d AND meta_key LIKE '_wp_trash_meta_%'", $order_id ) ) );
+		$this->assertEmpty( $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key LIKE '_wp_trash_meta_%'", $order_id ) ) );
+		//phpcs:enable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders
+	}
+
+	/**
 	 * @testDox Tests the `delete()` method on the COT datastore -- full deletes.
 	 *
 	 * @return void
@@ -969,6 +1001,48 @@ class OrdersTableDataStoreTests extends WC_Unit_Test_Case {
 		);
 		$this->assertCount( 5, $query->orders, 'Pagination works with specified limit.' );
 		$this->assertEquals( array_slice( $test_orders, 5, 5 ), $query->orders, 'The expected dataset is supplied when paginating through orders.' );
+	}
+
+	/**
+	 * @testdox Test that the query counts works as expected.
+	 *
+	 * @return void
+	 */
+	public function test_cot_query_count() {
+		$this->assertEquals( 0, ( new OrdersTableQuery() )->found_orders, 'We initially have zero orders within our custom order tables.' );
+
+		for ( $i = 0; $i < 30; $i ++ ) {
+			$order = new WC_Order();
+			$this->switch_data_store( $order, $this->sut );
+			if ( 0 === $i % 2 ) {
+				$order->set_billing_address_2( 'Test' );
+			}
+			$order->save();
+		}
+
+		$query = new OrdersTableQuery( array( 'limit' => 5 ) );
+		$this->assertEquals( 30, $query->found_orders, 'Specifying limits still calculate all found orders.' );
+
+		// Count does not change based on the fields that we are fetching.
+		$query = new OrdersTableQuery(
+			array(
+				'fields' => 'ids',
+				'limit'  => 5,
+			)
+		);
+		$this->assertEquals( 30, $query->found_orders, 'Fetching specific field does not change query count.' );
+
+		$query = new OrdersTableQuery(
+			array(
+				'field_query' => array(
+					array(
+						'field' => 'billing_address_2',
+						'value' => 'Test',
+					),
+				),
+			)
+		);
+		$this->assertEquals( 15, $query->found_orders, 'Counting orders with a field query works.' );
 	}
 
 	/**
@@ -1834,5 +1908,50 @@ class OrdersTableDataStoreTests extends WC_Unit_Test_Case {
 		$product = new \WC_Product();
 		$product->save();
 		$this->assertFalse( wc_get_order( $product->get_id() ) );
+	}
+
+	/**
+	 * @testDox Make sure that getting order type for non order return without warning.
+	 */
+	public function test_get_order_type_for_non_order() {
+		$product = WC_Helper_Product::create_simple_product();
+		$product->save();
+		$this->assertEquals( '', $this->sut->get_order_type( $product->get_id() ) );
+	}
+
+	/**
+	 * @testDox Test get order type working as expected.
+	 */
+	public function test_get_order_type_for_order() {
+		$order = $this->create_complex_cot_order();
+		$this->assertEquals( 'shop_order', $this->sut->get_order_type( $order->get_id() ) );
+	}
+
+	/**
+	 * @testDox Test that we are not duplicating address indexing when updating.
+	 */
+	public function test_address_index_saved_on_update() {
+		global $wpdb;
+		$this->toggle_cot( true );
+		$this->disable_cot_sync();
+		$order = new WC_Order();
+		$order->set_billing_address_1( '123 Main St' );
+		$order->save();
+
+		$this->assertTrue( false !== strpos( $order->get_meta( '_billing_address_index', true ), '123 Main St' ) );
+		$order = wc_get_order( $order->get_id() );
+		$order->set_billing_address_2( 'Apt 1' );
+		$order->save();
+
+		$order_meta_table = $this->sut::get_meta_table_name();
+		// Assert that we are not duplicating address indexes.
+		$result = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$order_meta_table} WHERE order_id = %d AND meta_key = '_billing_address_index'", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$order->get_id()
+			)
+		);
+
+		$this->assertEquals( 1, $result );
 	}
 }

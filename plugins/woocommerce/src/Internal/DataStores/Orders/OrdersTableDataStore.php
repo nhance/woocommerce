@@ -889,7 +889,12 @@ WHERE
 	 * @return int[] Array of order IDs.
 	 */
 	public function search_orders( $term ) {
-		$order_ids = wc_get_orders( array( 's' => $term ) );
+		$order_ids = wc_get_orders(
+			array(
+				's'      => $term,
+				'return' => 'ids',
+			)
+		);
 
 		/**
 		 * Provides an opportunity to modify the list of order IDs obtained during an order search.
@@ -948,7 +953,7 @@ WHERE
 	 */
 	public function get_order_type( $order_id ) {
 		$type = $this->get_orders_type( array( $order_id ) );
-		return $type[ $order_id ];
+		return $type[ $order_id ] ?? '';
 	}
 
 	/**
@@ -1022,13 +1027,42 @@ WHERE
 	 *
 	 * @return void
 	 */
-	private function init_order_record( \WC_Abstract_Order &$order, int $order_id, \stdClass $order_data ) {
+	protected function init_order_record( \WC_Abstract_Order &$order, int $order_id, \stdClass $order_data ) {
 		$order->set_defaults();
 		$order->set_id( $order_id );
 		$filtered_meta_data = $this->filter_raw_meta_data( $order, $order_data->meta_data );
 		$order->init_meta_data( $filtered_meta_data );
 		$this->set_order_props_from_data( $order, $order_data );
 		$order->set_object_read( true );
+	}
+
+	/**
+	 * For post based data stores, this was used to filter internal meta data. For custom tables, technically there is no internal meta data,
+	 * (i.e. we store all core data as properties for the order, and not in meta data). So this method is a no-op.
+	 *
+	 * Except that some meta such as billing_address_index and shipping_address_index are infact stored in meta data, so we need to filter those out.
+	 *
+	 * However, declaring $internal_meta_keys is still required so that our backfill and other comparison checks works as expected.
+	 *
+	 * @param \WC_Data $object Object to filter meta data for.
+	 * @param array    $raw_meta_data Raw meta data.
+	 *
+	 * @return array Filtered meta data.
+	 */
+	public function filter_raw_meta_data( &$object, $raw_meta_data ) {
+		$filtered_meta_data = parent::filter_raw_meta_data( $object, $raw_meta_data );
+		$allowed_keys       = array(
+			'_billing_address_index',
+			'_shipping_address_index',
+		);
+		$allowed_meta       = array_filter(
+			$raw_meta_data,
+			function( $meta ) use ( $allowed_keys ) {
+				return in_array( $meta->meta_key, $allowed_keys, true );
+			}
+		);
+
+		return array_merge( $allowed_meta, $filtered_meta_data );
 	}
 
 	/**
@@ -1059,9 +1093,7 @@ WHERE
 		 *
 		 * So we write back to the order table when order modified date is more recent than post modified date. Otherwise, we write to the post table.
 		 */
-		if ( $order_modified_date > $post_order_modified_date ) {
-			return;
-		} else {
+		if ( $post_order_modified_date >= $order_modified_date ) {
 			$this->migrate_post_record( $order, $post_order );
 		}
 	}
@@ -1315,7 +1347,7 @@ WHERE
 	 *
 	 * @return \stdClass[]|object|null DB Order objects or error.
 	 */
-	private function get_order_data_for_ids( $ids ) {
+	protected function get_order_data_for_ids( $ids ) {
 		if ( ! $ids ) {
 			return array();
 		}
@@ -1705,13 +1737,6 @@ FROM $order_meta_table
 		}
 
 		if ( ! empty( $args['force_delete'] ) ) {
-			$this->delete_order_data_from_custom_order_tables( $order_id );
-			$order->set_id( 0 );
-
-			// If this datastore method is called while the posts table is authoritative, refrain from deleting post data.
-			if ( ! is_a( $order->get_data_store(), self::class ) ) {
-				return;
-			}
 
 			/**
 			 * Fires immediately before an order is deleted from the database.
@@ -1722,6 +1747,14 @@ FROM $order_meta_table
 			 * @param WC_Order $order    Instance of the order that is about to be deleted.
 			 */
 			do_action( 'woocommerce_before_delete_order', $order_id, $order );
+
+			$this->delete_order_data_from_custom_order_tables( $order_id );
+			$order->set_id( 0 );
+
+			// If this datastore method is called while the posts table is authoritative, refrain from deleting post data.
+			if ( ! is_a( $order->get_data_store(), self::class ) ) {
+				return;
+			}
 
 			// Delete the associated post, which in turn deletes order items, etc. through {@see WC_Post_Data}.
 			// Once we stop creating posts for orders, we should do the cleanup here instead.
@@ -1759,7 +1792,7 @@ FROM $order_meta_table
 		}
 
 		$trash_metadata = array(
-			'_wp_trash_meta_status' => $order->get_status( 'edit' ),
+			'_wp_trash_meta_status' => 'wc-' . $order->get_status( 'edit' ),
 			'_wp_trash_meta_time'   => time(),
 		);
 
@@ -1775,13 +1808,21 @@ FROM $order_meta_table
 
 		$wpdb->update(
 			self::get_orders_table_name(),
-			array( 'status' => 'trash' ),
+			array(
+				'status'           => 'trash',
+				'date_updated_gmt' => current_time( 'Y-m-d H:i:s', true ),
+			),
 			array( 'id' => $order->get_id() ),
-			array( '%s' ),
+			array( '%s', '%s' ),
 			array( '%d' )
 		);
 
 		$order->set_status( 'trash' );
+
+		$data_synchronizer = wc_get_container()->get( DataSynchronizer::class );
+		if ( $data_synchronizer->data_sync_is_enabled() ) {
+			wp_trash_post( $order->get_id() );
+		}
 	}
 
 	/**
@@ -1809,7 +1850,7 @@ FROM $order_meta_table
 
 		$previous_status           = $order->get_meta( '_wp_trash_meta_status' );
 		$valid_statuses            = wc_get_order_statuses();
-		$previous_state_is_invalid = ! array_key_exists( 'wc-' . $previous_status, $valid_statuses );
+		$previous_state_is_invalid = ! array_key_exists( $previous_status, $valid_statuses );
 		$pending_is_valid_status   = array_key_exists( 'wc-pending', $valid_statuses );
 
 		if ( $previous_state_is_invalid && $pending_is_valid_status ) {
@@ -1852,9 +1893,26 @@ FROM $order_meta_table
 		$order->save();
 
 		// Was the status successfully restored? Let's clean up the meta and indicate success...
-		if ( $previous_status === $order->get_status() ) {
+		if ( 'wc-' . $order->get_status() === $previous_status ) {
 			$order->delete_meta_data( '_wp_trash_meta_status' );
 			$order->delete_meta_data( '_wp_trash_meta_time' );
+			$order->delete_meta_data( '_wp_trash_meta_comments_status' );
+			$order->save_meta_data();
+
+			$data_synchronizer = wc_get_container()->get( DataSynchronizer::class );
+			if ( $data_synchronizer->data_sync_is_enabled() ) {
+				//The previous $order->save() will have forced a sync to the posts table,
+				//this implies that the post status is not "trash" anymore, and thus
+				//wp_untrash_post would do nothing.
+				wp_update_post(
+					array(
+						'ID'          => $id,
+						'post_status' => 'trash',
+					)
+				);
+
+				wp_untrash_post( $id );
+			}
 
 			return true;
 		}
